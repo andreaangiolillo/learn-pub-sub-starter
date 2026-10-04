@@ -21,13 +21,18 @@ func main() {
 	defer conn.Close()
 
 	fmt.Println("Connetion Exablished")
-	ch, err := conn.Channel()
+	ch, _, err := pubsub.DeclareAndBind(
+		conn,
+		routing.ExchangePerilTopic,
+		"game_logs",
+		routing.GameLogSlug,
+		pubsub.Durable,
+	)
+
 	if err != nil {
 		fmt.Printf("%v. Terminating the Server...", err)
 		os.Exit(1)
 	}
-
-
 	
 	gamelogic.PrintServerHelp()
 
@@ -41,34 +46,36 @@ func main() {
 			switch i {
 				case "pause":
 					fmt.Println("Sending a pause message..")
-          msg := routing.PlayingState{
-		        IsPaused: true,
-	        }
- 
-          err = pubsub.PublishJSON(ch, routing.ExchangePerilDirect, routing.PauseKey, msg)
+				  	msg := routing.PlayingState{
+						IsPaused: true,
+					}
+		 
+					err = pubsub.PublishJSON(ch, routing.ExchangePerilDirect, routing.PauseKey, msg)
 
-          if err != nil {
-            fmt.Printf("%v. Terminating the Server...", err)
-            os.Exit(1)
-          }
-        case "resume":
+					if err != nil {
+						fmt.Printf("%v. Terminating the Server...", err)
+						os.Exit(1)
+			 		 }
+				case "resume":
 					fmt.Println("Sending a resume message..")
-          msg := routing.PlayingState{
-		        IsPaused: false,
-	        }
+					msg := routing.PlayingState{
+						IsPaused: false,
+					}
 
-          err = pubsub.PublishJSON(ch, routing.ExchangePerilDirect, routing.PauseKey, msg)
+				  	err = pubsub.PublishJSON(ch, routing.ExchangePerilDirect, routing.PauseKey, msg)
 
-          if err != nil {
-            fmt.Printf("%v. Terminating the Server...", err)
-            os.Exit(1)
-          }
-        case "quit":
-          fmt.Println("Exiting...")
-          os.Exit(0)
-        default:
-          fmt.Printf("Unknown command %s, skipping...", i ) 
+					if err != nil {
+						fmt.Printf("%v. Terminating the Server...", err)
+						os.Exit(1)
+			 		}
+				case "quit", "exit":
+					fmt.Println("Exiting...")
+					os.Exit(0)
+				case "help":
+					gamelogic.PrintServerHelp()
+				default:
+					fmt.Printf("Unknown command %s, skipping...", i ) 
+				}
 			}
 		}
 	}
-}
