@@ -3,6 +3,7 @@ package pubsub
 
 import (
 	"encoding/json"
+	"encoding/gob"
 	"context"
 	"log"
 	"fmt"
@@ -11,10 +12,14 @@ import (
 )
 
 type SimpleQueueType int
+type AckType int
 
 const (
 	Durable SimpleQueueType = iota
 	Transient
+	Ack AckType = iota
+	NackRequeue
+	NackDiscard
 )
 
 var (
@@ -25,6 +30,7 @@ var (
 		logger.Output(2, info)
 	}
 )
+
 
 
 func PublishJSON[T any](ch *amqp.Channel, exchange, key string, val T) error {
@@ -39,6 +45,43 @@ func PublishJSON[T any](ch *amqp.Channel, exchange, key string, val T) error {
 	}
 
 	return ch.PublishWithContext(context.Background(), exchange, key, false, false, msg) 
+}
+
+func PublishGob[T any](ch *amqp.Channel, exchange, key string, val T) error {
+	var out bytes.Buffer        
+	enc := gob.NewEncoder(&out)
+	err := enc.Encode(val)
+	if err != nil {
+		return err
+	}
+
+	msg := amqp.Publishing{
+		ContentType:  "application/gob",
+		Body:         out.Bytes(),
+	}
+
+	return ch.PublishWithContext(context.Background(), exchange, key, false, false, msg) 
+}
+
+func SubscribeGob[T any](
+    conn *amqp.Connection,
+    exchange,
+    queueName,
+    key string,
+    queueType SimpleQueueType, // an enum to represent "durable" or "transient"
+    handler func(T)AckType,
+) error {
+	return subscribe(conn, exchange, queueName, key, queueType, handler,
+		func(payload []byte) (T, error) {
+			dec := gob.NewDecoder(bytes.NewBuffer(payload))
+			var body T
+			err := dec.Decode(&body)
+			if err != nil {
+				infof(fmt.Sprint("Got error when executing delivery. Skipping..\n"))
+			}
+
+			return body, err
+		})
 }
 
 func DeclareAndBind(
@@ -64,9 +107,11 @@ func DeclareAndBind(
 		autoDelete = true
 		exclusive = true
 	}
-
-	// name string, durable, autoDelete, exclusive, noWait bool, args Table
-	queue, err := ch.QueueDeclare(queueName, durable, autoDelete, exclusive, false, nil)
+	
+	table := amqp.Table{
+    	"x-dead-letter-exchange": "peril_dlx",
+	}
+	queue, err := ch.QueueDeclare(queueName, durable, autoDelete, exclusive, false, table)
 	if err != nil {
 		return nil, nil, err	
 	}
@@ -86,37 +131,71 @@ func SubscribeJSON[T any](
     queueName,
     key string,
     queueType SimpleQueueType, // an enum to represent "durable" or "transient"
-    handler func(T),
+    handler func(T)AckType,
+) error {
+	return subscribe(conn, exchange, queueName, key, queueType, handler,
+		func(payload []byte) (T, error) {
+			var body T
+			err := json.Unmarshal(payload, &body)
+			if err != nil {
+				infof(fmt.Sprint("Got error when executing delivery. Skipping..\n"))
+			}
+
+			return body, err
+		})
+}
+
+func subscribe[T any](
+	conn *amqp.Connection,
+	exchange,
+	queueName,
+	key string,
+	queueType SimpleQueueType,
+	handler func(T)AckType,
+	unmarshaller func([]byte) (T, error),
 ) error {
 	ch, _, err := DeclareAndBind(conn, exchange, queueName, key, queueType)
 	if err != nil {
+		fmt.Printf("%v\n", err)
 		return err
 	}
 	
+	err = ch.Qos(10, 10, true)
+	if err != nil {
+		fmt.Printf("%v\n", err)
+		return err
+	}
 	deliveryCh, err := ch.Consume(queueName, "", false, false, false, false, nil)
 	if err != nil {
+		fmt.Printf("%v\n", err)
 		return err
 	}
 
-	go execute(deliveryCh, handler)
+	go execute(deliveryCh, handler, unmarshaller)
 	return nil
 }
 
-
-func execute[T any] (ch <-chan amqp.Delivery, handler func(T)) {
+func execute[T any] (
+	ch <-chan amqp.Delivery, 
+	handler func(T) AckType, 
+	unmarshaller func([]byte) (T, error)) {
 	for d := range ch {
-		var body T
-		err := json.Unmarshal(d.Body, &body)
+		body, err := unmarshaller(d.Body)
 		if err != nil {
+			fmt.Printf("%v\n", err)
 			infof(fmt.Sprint("Got error when executing delivery. Skipping..\n"))
 			continue
 		}
-		fmt.Printf("executing %s", string(d.Body))
-		handler(body)
-		d.Ack(false)
-		if err != nil {
-			infof(fmt.Sprint("Got error when ack delivery. Skipping..\n"))
-			continue
+		ackType := handler(body)
+		switch ackType {
+			case Ack:
+				d.Ack(false)
+			case NackRequeue:
+				d.Nack(false, true)
+			case NackDiscard:
+				d.Nack(false, false)
+			default:
+				fmt.Printf("Unespected ackType %s", ackType) 
 		}
 	}
 }

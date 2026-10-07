@@ -25,7 +25,7 @@ func main() {
 		conn,
 		routing.ExchangePerilTopic,
 		"game_logs",
-		routing.GameLogSlug,
+		fmt.Sprintf("%s.*", routing.GameLogSlug),
 		pubsub.Durable,
 	)
 
@@ -33,6 +33,15 @@ func main() {
 		fmt.Printf("%v. Terminating the Server...", err)
 		os.Exit(1)
 	}
+
+	pubsub.SubscribeGob(
+		conn,
+		routing.ExchangePerilTopic,
+		"game_logs",
+		fmt.Sprintf("%s.*", routing.GameLogSlug),
+		pubsub.Durable,
+		handleGameLogs(),	
+	)
 	
 	gamelogic.PrintServerHelp()
 
@@ -79,3 +88,15 @@ func main() {
 			}
 		}
 	}
+
+
+func handleGameLogs()func(routing.GameLog) pubsub.AckType{
+	return func (gamelog routing.GameLog) pubsub.AckType {
+		defer fmt.Print("< ")
+		err := gamelogic.WriteLog(gamelog)
+		if err != nil {
+			return pubsub.NackRequeue
+		}
+		return pubsub.Ack
+	}
+}

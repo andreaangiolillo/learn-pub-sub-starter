@@ -7,7 +7,10 @@ const (
 
 	PauseKey = "pause"
 
+	ArmyMoveKey = "army_moves.*"
+
 	GameLogSlug = "game_logs"
+
 )
 
 const (
